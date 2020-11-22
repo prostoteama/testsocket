@@ -1,33 +1,102 @@
-const express = require( 'express' );
-const bodyParser = require( 'body-parser' );
-const path = require( 'path' );
+const express = require("express");
+const socketIO = require("socket.io");
+const { createServer } = require("http");
+const cors = require("cors");
 
-const router = express.Router();
+class Server {
+  constructor() {
+    this.app;
+    this.httpServer;
+    this.io;
+    this.DEFAULT_PORT = 5000;
+    this.activeSockets = [];
+    
+    this.initialize();
+    this.handleRoutes();
+    this.handleSocketConnection();
+  }
 
-const app = express();
+  initialize() {
+    this.app = express();
+    if (process.env.NODE_ENV === "production") {
+      // Set a static folder
+      app.use(express.static("client/build"));
+      app.get("*", (req, res) =>
+        res.sendFile(path.resolve(__dirname, "client", "build", "index.html"))
+      );
+    }
 
-/**
- * Configure the middleware.
- * bodyParser.json() returns a function that is passed as a param to app.use() as middleware
- * With the help of this method, we can now send JSON to our express application.
- */
-app.use( bodyParser.urlencoded( { extended: false } ) );
-app.use( bodyParser.json() );
+    this.httpServer = createServer(this.app);
+    this.io = socketIO(this.httpServer, {
+      cors: {
+        origin: "*",
+      },
+    });
+  }
 
-// We export the router so that the server.js file can pick it up
-module.exports = router;
+  handleRoutes() {
+    this.app.get("/some", (req, res) => {
+      res.send({ msg: "This is CORS-enabled for all origins!" });
+    });
+  }
 
-// Combine react and node js servers while deploying( YOU MIGHT HAVE ALREADY DONE THIS BEFORE
-// What you need to do is make the build directory on the heroku, which will contain the index.html of your react app and then point the HTTP request to the client/build directory
+  handleSocketConnection() {
+    this.io.on("connection", (socket) => {
+      console.log('connected', socket.id )
+      const existingSocket = this.activeSockets.find(
+        (existingSocket) => existingSocket === socket.id
+      );
 
-if ( process.env.NODE_ENV === 'production' ) {
-	// Set a static folder
-	app.use( express.static( 'client/build' ) );
-	app.get( '*', ( req, res ) => res.sendFile( path.resolve( __dirname, 'client', 'build', 'index.html' ) ) );
+      if (!existingSocket) {
+        this.activeSockets.push(socket.id);
 
+        socket.emit("update-user-list", {
+          users: this.activeSockets.filter(
+            (existingSocket) => existingSocket !== socket.id
+          ),
+        });
+
+        socket.broadcast.emit("update-user-list", {
+          users: [socket.id],
+        });
+      }
+
+      socket.on("call-user", (data) => {
+        socket.to(data.to).emit("call-made", {
+          offer: data.offer,
+          socket: socket.id,
+        });
+      });
+
+      socket.on("make-answer", (data) => {
+        socket.to(data.to).emit("answer-made", {
+          socket: socket.id,
+          answer: data.answer,
+        });
+      });
+
+      socket.on("reject-call", (data) => {
+        socket.to(data.from).emit("call-rejected", {
+          socket: socket.id,
+        });
+      });
+
+      socket.on("disconnect", () => {
+        this.activeSockets = this.activeSockets.filter(
+          (existingSocket) => existingSocket !== socket.id
+        );
+        socket.broadcast.emit("remove-user", {
+          socketId: socket.id,
+        });
+      });
+    });
+  }
+
+  listen(callback) {
+    this.httpServer.listen(this.DEFAULT_PORT, () =>
+      callback(this.DEFAULT_PORT)
+    );
+  }
 }
 
-// Set up a port
-const port = process.env.PORT || 5000;
-
-app.listen( port, () => console.log( `Server running on port: ${port}` ) );
+module.exports = Server;
